@@ -9,7 +9,9 @@
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
-
+uint get_refcount(uint pa);
+void dec_refcount(uint pa);
+void inc_refcount(uint pa);
 // Set up CPU's kernel segment descriptors.
 // Run once on entry on each CPU.
 void
@@ -318,7 +320,6 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -327,20 +328,24 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
+
+
+    *pte &= (~PTE_W);
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
+
+    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
       goto bad;
     }
-  }
+    inc_refcount(pa);
+    }
+    
+    lcr3(V2P(pgdir));
   return d;
 
 bad:
   freevm(d);
+  cprintf("copyuvm bad \n");
   return 0;
 }
 
@@ -385,6 +390,36 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   return 0;
 }
 
+
+void pagefault(void)
+{
+  uint pagefault_VA;
+  pte_t *pte;
+  uint rc, pa;
+  cprintf("pagefault 실행 \n");
+  if((pagefault_VA = rcr2()) < 0){
+    panic("잘못된 접근");
+    return ;
+  }
+
+  //va 가 속한 pte를 가져온다
+  pte = walkpgdir(myproc()->pgdir, (void *)pagefault_VA, 0);
+  // pte를 통해서 pa를 얻는다
+  pa = PTE_ADDR(*pte);
+  rc = get_refcount(pa);
+
+  if(rc>1){
+    char *mem;
+    if((mem = kalloc()) == 0)    return ;
+    memmove(mem, (char*)P2V(pa), PGSIZE);
+    *pte = V2P(mem) | PTE_P | PTE_U | PTE_W;
+    dec_refcount(pa);
+  }
+  else if(rc == 1)
+  *pte |= PTE_W ;
+
+  lcr3(V2P(myproc()->pgdir));
+}
 //PAGEBREAK!
 // Blank page.
 //PAGEBREAK!
